@@ -1,0 +1,1 @@
+"""SPR arm: signal-to-perturbation-ratio estimation + cross-instrument transfer."""

@@ -1,0 +1,189 @@
+# Smoke-test profile — never scientifically valid.
+#
+# Tiny budgets, one seed, two bit-widths. Outputs route under results/smoke/ and
+# MUST never be consumed by paper-analysis scripts. This profile exists to prove
+# the pipeline loads and runs end-to-end before any expensive Gemma run.
+
+mode: smoke
+schema_version: 1
+
+seeds: [0]
+
+model:
+  identifier: EleutherAI/pythia-70m-deduped
+  tokenizer_identifier: EleutherAI/pythia-70m-deduped
+  revision: main
+
+readout:
+  hook: blocks.4.hook_resid_post
+  layer: 4
+
+compression:
+  method: RTN
+  scheme: per_output_channel
+  bit_widths: [8, 4]
+  quantized_modules:
+    - attn_q
+    - attn_k
+    - attn_v
+    - attn_o
+    - mlp_in
+    - mlp_out
+    - mlp_gate
+  excluded_modules:
+    - embed
+    - unembed
+    - layer_norm
+    - bias
+  expected_rtn_module_counts:
+    # Pythia-70M has six GPT-NeoX blocks and no gated MLP projection.
+    attn_q: 6
+    attn_k: 6
+    attn_v: 6
+    attn_o: 6
+    mlp_in: 6
+    mlp_out: 6
+    mlp_gate: 0
+
+datasets:
+  harmfulness:
+    identifier: allenai/wildguardmix
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/allenai/wildguardmix
+
+corpora:
+  activation:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/wikitext
+  behavioral:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets/wikitext
+
+budgets:
+  dry_run:
+    max_examples: 4
+    max_tokens: 256
+  smoke:
+    max_examples: 8
+    max_tokens: 512
+  full:
+    max_examples: 32
+    max_tokens: 2048
+
+statistics:
+  confidence_level: 0.95
+  bootstrap:
+    unit: probe_cell
+    n_resamples: 100
+  permutation:
+    n_resamples: 100
+  multiple_testing:
+    method: none
+
+spr:
+  signal_statistic: peak_abs_projection
+  perturbation_statistic: mean_abs_directional_delta
+  preregistered_estimator: peak_abs_projection/mean_abs_directional_delta
+  eps: 1.0e-8
+
+# Smoke provenance (harmonized identity on the cheap pilot model). Smoke runs
+# are never scientifically valid; outputs route under results/smoke/.
+provenance:
+  corpus_id: wikitext
+  corpus_config: wikitext-2-raw-v1
+  corpus_split: train
+  corpus_revision: null
+  tokenization_protocol: per_document_bos_truncate
+  tokenizer_id: EleutherAI/pythia-70m-deduped
+  tokenizer_revision: null
+  bos_policy: prepend_each_document
+  sequence_packing: none
+
+# Smoke circuits leg: circuit-tracer 0.5.2 ships transcoder sets for Gemma/Llama
+# only, so the Pythia smoke profile traces Gemma-2-2B (on CUDA — the smoke LM is
+# CPU-only but tracing requires the GPU machine). Integration-only; no scientific
+# claim crosses models.
+circuits:
+  backend: transformerlens
+  model_identifier: google/gemma-2-2b
+  device: cuda
+  transcoder_set: mntss/gemma-scope-transcoders
+  prompts:
+    - "The capital of France is"
+    - "The capital of Japan is"
+
+# Smoke patching leg: real condition-specific NIE/PIE/INT on the tiny Pythia
+# model (CPU-executable). Prompts tokenize to equal lengths so hook shapes align.
+patching:
+  prompts:
+    clean: "The capital of France is"
+    corrupted: "The capital of Japan is"
+  components: [blocks.4.hook_resid_post]
+  positive_token: " Paris"
+  negative_token: " Tokyo"
+
+model_config:
+  model:
+    name: EleutherAI/pythia-70m-deduped
+    dtype: float32
+    device: cpu
+  readout:
+    hook: blocks.4.hook_resid_post
+    layer: 4
+  probe:
+    layers: [4]
+    comparison_layer: 4
+    n_seeds: 1
+    base_auc_eligibility: 0.0
+    big_drop_auc_threshold: 0.05
+    operational_failure_auc: 0.70
+    test_size: 0.2
+    batch_size: 4
+    monitors: [harmfulness]
+    datasets:
+      harmfulness:
+        dataset_id: allenai/wildguardmix
+        config: wildguardtrain
+        split: train
+        text_field: prompt
+        label_field: prompt_harm_label
+        label_map: { unharmful: 0, harmful: 1 }
+        filtering: { drop_null_labels: true }
+  sae:
+    release: pythia-70m-deduped-res-sm
+    sae_id: blocks.4.hook_resid_post
+    d_sae: 32768
+    layer: 4
+    hook: blocks.4.hook_resid_post
+  perplexity:
+    sliding_window_size: 256
+    stride: 128
+    seq_len: 256
+    n_tokens: 512
+    ppl_max_tokens: 512
+
+quant_config:
+  compression:
+    operator: rtn
+    scheme: per_output_channel
+    bit_widths: [8, 4]
+    quant_modules:
+      attn_q: [q_proj, W_Q]
+      attn_k: [k_proj, W_K]
+      attn_v: [v_proj, W_V]
+      attn_o: [o_proj, W_O]
+      mlp_in: [up_proj, W_in]
+      mlp_out: [down_proj, W_out]
+      mlp_gate: [gate_proj, W_gate]
+    skip_modules:
+      embed: [embed, wte, token_embedding]
+      unembed: [lm_head, unembed, w_u, final_proj]
+      ln: [layernorm, layer_norm, ln, norm]
+      bias: [bias]

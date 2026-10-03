@@ -1,0 +1,84 @@
+# Primary model substrate.
+# Gemma-2-2B (base, NOT -it) — matches Duan 2606.03002 (SAE arm) and Gemma Scope layer-12 SAE.
+model:
+  name: "google/gemma-2-2b"          # base variant; do not use -it
+  family: "gemma2"
+  n_params: 2.6e9
+  dtype: "float16"
+  device: "cuda"
+
+# Read-out layer: Layer 12 residual stream — where the Gemma Scope
+# layer-12 SAE Duan (2606.03002) uses lives. Required for probe/SAE/circuit
+# comparisons to be meaningful.
+readout:
+  hook: "blocks.12.hook_resid_post"   # TransformerLens hook name
+  layer: 12
+
+# Probe arm layer sweep — Duan 2606.15980 §2.1 uses layers {4, 8, 12, 16, 20, 24}.
+# Cross-instrument comparisons are made at `readout.layer` only.
+probe:
+  layers: [4, 8, 12, 16, 20, 24]
+  comparison_layer: 12                 # must equal readout.layer; cross-instrument site
+  n_seeds: 5                           # 5 probe seeds (2606.15980 §2.1)
+  base_auc_eligibility: 0.75           # base AUC >= 0.75 gate (2606.15980 §2.1)
+  big_drop_auc_threshold: 0.05         # big drop = AUC falling by >= 0.05
+  operational_failure_auc: 0.70        # operational failure = post-update AUC < 0.70
+                                       # (absolute threshold, not a fixed drop)
+  test_size: 0.2                       # held-out split for frozen-probe eval
+  monitors:                            # the 4 monitor tasks (2606.15980 §2.1)
+    - "harmfulness"                    # WildGuardMix
+    - "privacy"                        # PII
+    - "refusal"                        # refusal-compliance, XSTest
+    - "high_stakes"                    # synthetic high-stakes construct
+  # OPEN QUESTION: Exact dataset identifiers/splits/columns/
+  # label mappings from 2606.15980 are not enumerated in the paper. The dict
+  # specs below are the full contract src/probes/train_eval.py::load_probe_dataset
+  # consumes (dataset_id/split/text_field/label_field/label_map) and MUST be
+  # confirmed against the primary source before the reproduction gate is claimed.
+  datasets:
+    harmfulness:
+      dataset_id: "allenai/wildguardmix"
+      split: "train"
+      text_field: "prompt"
+      label_field: "harm_label"
+      label_map: { "benign": 0, "harmful": 1 }
+    privacy:
+      dataset_id: "pii/pii-masking-200k"
+      split: "train"
+      text_field: "prompt"
+      label_field: "has_pii"
+      label_map: { "no": 0, "yes": 1 }
+    refusal:
+      dataset_id: "should/should"
+      split: "test"
+      text_field: "prompt"
+      label_field: "is_refusal"
+      label_map: { "compliant": 0, "refusal": 1 }
+    high_stakes:
+      dataset_id: "synthetic/high-stakes-monitor"
+      split: "test"
+      text_field: "prompt"
+      label_field: "label"
+      label_map: { "safe": 0, "unsafe": 1 }
+
+# Gemma Scope SAE — Duan 2606.03002 uses the canonical layer-12 residual-stream
+# checkpoint with d_sae = 16,384.
+sae:
+  release: "gemma-scope-2b-pt-res"
+  sae_id: "layer_12/width_16k/average_l0_82"
+  d_sae: 16384
+  layer: 12
+  hook: "blocks.12.hook_resid_post"
+
+# Corpora
+corpus:
+  behavioral: "wikitext-2-raw"         # behavioral/perplexity corpus (WikiText-2-raw)
+  activation: "fineweb-edu-subset"     # probe/SAE activation corpus (Borobia's convention)
+
+# Perplexity protocol — Duan 2606.03002 Table 1 (ΔPPL column).
+perplexity:
+  sliding_window_size: 512             # sliding-window protocol (INT6: −3.45%)
+  stride: 256                          # window advance; overlap supplies context only
+  seq_len: 512
+  n_tokens: 500000                     # SAE activation budget (matches 2606.03002 run scale)
+  ppl_max_tokens: 100000               # token budget for the PPL table (behavioral corpus)

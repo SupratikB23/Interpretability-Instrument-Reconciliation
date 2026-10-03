@@ -1,0 +1,102 @@
+# RTN sweep. Compression operator: round-to-nearest (RTN),
+# per-output-channel, bit-widths {8,7,6,5,4} — exactly Duan 2606.03002 §3.2 Eq. 2.
+# Same operator feeds ALL four instrument arms (probes re-run under RTN —
+# Duan 2606.15980 originally used bnb INT8/NF4/GPTQ/AWQ/W8A8; R1 deliberately swaps
+# to RTN so the instrument comparison is not confounded by compression-method
+# differences).
+compression:
+  operator: "rtn"                     # round-to-nearest
+  scheme: "per_output_channel"        # per-output-channel, symmetric range
+  bit_widths: [8, 7, 6, 5, 4]         # fixed sweep; FP16 (16) is the reference
+  # Attention Q/K/V/O, MLP in/out + gate (Gemma gated MLP). Each entry maps a
+  # descriptive token to the parameter-name matchers for both HuggingFace
+  # (q_proj, up_proj, ...) and TransformerLens (W_Q, W_in, ...) conventions.
+  quant_modules:
+    attn_q:   ["q_proj", "W_Q"]
+    attn_k:   ["k_proj", "W_K"]
+    attn_v:   ["v_proj", "W_V"]
+    attn_o:   ["o_proj", "W_O"]
+    mlp_in:   ["up_proj", "W_in"]
+    mlp_out:  ["down_proj", "W_out"]
+    mlp_gate: ["gate_proj", "W_gate"]
+  # Embeddings, unembeddings, layer norms, biases untouched (2606.03002 App. L).
+  skip_modules:
+    embed:    ["embed", "wte", "token_embedding"]
+    unembed:  ["lm_head", "unembed", "w_u", "final_proj"]
+    ln:       ["layernorm", "layer_norm", "ln", "norm"]
+    bias:     ["bias"]
+
+# Reproduction gate 2: probe-arm quantization big-drop rate must be
+# consistent in direction and order of magnitude with Duan 2606.15980's 0.83–3.33%
+# (exact match not expected — R1 uses RTN, Duan used bnb/GPTQ/AWQ).
+gate_probe:
+  reference_big_drop_rate_min: 0.0083   # 0.83%
+  reference_big_drop_rate_max: 0.0333   # 3.33%
+  # Strict gate parameters. The legacy 10x order-of-magnitude
+  # band is intentionally NOT supported: a 10x band around 0.0083–0.0333 would
+  # accept up to ~33% big-drop rate and defeat the gate.
+  min_eligible_count: 1                 # eligible (base-AUC-passing) cells required
+  min_eligible_coverage: 0.5            # eligible cells / all cells
+  max_operational_failures: 0           # post-update AUC < 0.70 cells tolerated
+  require_reference_interval: true      # observed rate must fall inside the band
+
+# Reproduction gate 1: SAE-arm Gemma-2-2B INT6 survival within ±3
+# percentage points of Duan's reported values (2606.03002 Table 1).
+gate_sae_int6:
+  bits: 6                              # the gate's target bit-width (INT6)
+  survived_target: 51.30
+  degraded_target: 48.70
+  damaged_target: 0.00
+  tolerance_pp: 3.0                    # ±3 percentage points
+
+# Survival taxonomy — Duan 2606.03002 §2.2. Reuse exactly, do not redefine.
+sae_survival:
+  active_firing_rate_min: 0.001        # f_j > 0.001 ("active" gate)
+  survived_corr_min: 0.9               # Survived: c_j > 0.9
+  degraded_corr_min: 0.5               # Degraded: 0.5 <= c_j <= 0.9
+                                       # Damaged: c_j < 0.5
+
+# SPR transfer test: pre-registered success threshold in the
+# style of Duan's fixed +0.05 margin over lookup-table baselines. The primary
+# statistic is calibration/error based: negative log loss for
+# binary targets, negative RMSE for continuous targets. AUC/Spearman are
+# secondary diagnostics only.
+spr_transfer:
+  null_baseline_margin: 0.05           # observed transfer must exceed null by this margin
+  z_threshold: 2.0                     # ...and by this many null stds
+  n_null_shuffles: 1000
+  cv_folds: 5
+
+# CIRCUS stability ensemble — Parekh 2603.00523: B >= 9 non-nested threshold configs.
+circus:
+  n_configs_min: 9
+  consensus_threshold: 1.0             # strict consensus C_{tau=1} = core circuit
+  core_min: 1.0                        # core: s(e) = 1
+  contingent_min: 0.5                  # contingent: 0.5 <= s(e) < 1; noise: s(e) < 0.5
+  # Lossless noise-tail prune of the raw O(n^2) attribution graph. The ensemble's
+  # largest edge threshold is 0.95, so edges with cumulative influence above this
+  # can never be included in any view (s(e)=0, NOISE); dropping them changes no
+  # core/contingent inclusion frequency but stops the edge tables from bloating to
+  # tens of millions of rows. Kept just above 0.95 for float safety.
+  edge_retain_cumulative: 0.98
+
+# Patching arm — Vaidyanathan et al. 2606.27510: report NIE and PIE separately.
+patching:
+  metric: "logit_diff"                 # effect metric on the circuit prompt set
+
+# Results paths (results/ is gitignored). Mode-separated layout
+#: reproduction artifacts under results/reproduction/,
+# harmonized under results/harmonized/, smoke under results/smoke/. Gates read
+# the reproduction family only.
+results:
+  root: "results"
+  sae_survival: "results/reproduction/sae/survival_rates.csv"
+  sae_correlations: "results/reproduction/sae/correlations_int6.npz"
+  sae_perplexity: "results/reproduction/sae/perplexity.csv"
+  sae_metadata: "results/reproduction/sae/metadata.json"
+  sae_gate_report: "results/reproduction/sae/reproduction_gate.json"
+  probe_auc: "results/reproduction/probes/auc_calibration.csv"
+  circuit_stability: "results/harmonized/circuits/edge_stability.csv"
+  patching: "results/harmonized/patching/nie_pie.csv"
+  spr_within: "results/harmonized/spr/within_instrument.json"
+  spr: "results/harmonized/spr/transfer_results.json"

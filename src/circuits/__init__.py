@@ -1,0 +1,1 @@
+"""Circuit-discovery arm (CIRCUS stability ensembles over CLT graphs, 2603.00523)."""

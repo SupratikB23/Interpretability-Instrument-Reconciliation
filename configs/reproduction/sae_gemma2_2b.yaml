@@ -1,0 +1,182 @@
+# SAE-arm reproduction profile.
+#
+# Goal: exactly reproduce the Gemma-2-2B RTN sweep from Duan 2606.03002 using a
+# frozen Gemma Scope layer-12 residual-stream SAE, and evaluate the INT6 survival
+# gate (51.30% survived / 48.70% degraded / 0.00% damaged, ±3pp).
+#
+# Unlike the harmonized profile, this profile asserts the reference corpus and
+# SAE checkpoint provenance. RESOLVED 2026-08-30 against the primary source
+#: Duan 2606.03002v2 App. K Table K.2 names WikiText-2-raw
+# as the QDM feature-extraction corpus, so the previous FineWeb-Edu placeholder
+# is replaced below. All revisions are pinned and HF-verified.
+
+mode: reproduction
+schema_version: 1
+
+seeds: [0]
+
+model:
+  identifier: google/gemma-2-2b
+  tokenizer_identifier: google/gemma-2-2b
+  revision: main
+
+readout:
+  hook: blocks.12.hook_resid_post
+  layer: 12
+
+compression:
+  method: RTN
+  scheme: per_output_channel
+  bit_widths: [8, 7, 6, 5, 4]
+  quantized_modules:
+    - attn_q
+    - attn_k
+    - attn_v
+    - attn_o
+    - mlp_in
+    - mlp_out
+    - mlp_gate
+  excluded_modules:
+    - embed
+    - unembed
+    - layer_norm
+    - bias
+  expected_rtn_module_counts:
+    attn_q: 26
+    attn_k: 26
+    attn_v: 26
+    attn_o: 26
+    mlp_in: 26
+    mlp_out: 26
+    mlp_gate: 26
+
+datasets:
+  harmfulness:
+    identifier: allenai/wildguardmix
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/allenai/wildguardmix
+
+corpora:
+  activation:
+    # Duan 2606.03002 App. K Table K.2: "WikiText-2-raw. Non-empty lines are
+    # concatenated and tokenized before evaluation." Train split tokenizes to
+    # ~500k Gemma tokens (paper evaluates 499,968).
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: "b08601e04326c79dfdd32d625aee71d232d685c3"  # pinned 2026-08-30 HEAD of the wikitext dataset (HF-verified)
+    split: train
+    streaming: false
+    source: https://huggingface.co/datasets/wikitext
+  behavioral:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets/wikitext
+
+budgets:
+  dry_run:
+    max_examples: 16
+    max_tokens: 4096
+  smoke:
+    max_examples: 64
+    max_tokens: 8192
+  full:
+    max_examples: 100000
+    max_tokens: 500000
+
+statistics:
+  confidence_level: 0.95
+  bootstrap:
+    unit: sae_feature
+    n_resamples: 1000
+  permutation:
+    n_resamples: 1000
+  multiple_testing:
+    method: none
+
+spr:
+  signal_statistic: peak_abs_projection
+  perturbation_statistic: mean_abs_directional_delta
+  preregistered_estimator: peak_abs_projection/mean_abs_directional_delta
+  eps: 1.0e-8
+
+# Reference provenance required before this profile may claim reproduction
+# (src/sae/protocol.py::ReferenceProvenance). RESOLVED 2026-08-30 against the
+# primary source, Duan 2606.03002v2: App. K names
+# WikiText-2-raw; App. H confirms layer 12, width 16,384, 499,968 tokens. The
+# paper does not state the SAE's average-L0 variant; the HF registry for
+# layer_12/width_16k contains only {22, 41, 82, 176, 445} (verified live
+# 2026-08-30), so average_l0_82 is pinned as the closest available checkpoint.
+provenance:
+  source_reference: "Duan, E. (2026). Perplexity Can Miss SAE Feature Damage Under Quantization. arXiv:2606.03002v2 [cs.LG]; code: https://anonymous.4open.science/r/sae-feature-survival-quantization-0141/"
+  corpus_id: wikitext
+  corpus_config: wikitext-2-raw-v1
+  corpus_split: train
+  corpus_revision: "b08601e04326c79dfdd32d625aee71d232d685c3"  # pinned 2026-08-30 HEAD of the wikitext dataset (HF-verified)
+  # Duan 2606.03002 App. K: "WikiText-2-raw. Non-empty lines are concatenated and
+  # tokenized" into L=256 blocks. The pipeline now implements this exactly via
+  # sequence_packing=concatenate (pack_concatenated_blocks). The earlier
+  # per_document_bos_truncate protocol missed Gate 1 by 44pp (95.63% vs 51.30%);
+  # this is the fix for the leading root cause. (The SAE L0 variant — average_l0_82
+  # vs the paper's unspecified checkpoint — remains a separate open item that may
+  # still cause residual deviation; validate on the GPU box.)
+  tokenization_protocol: concatenate_lines_fixed_blocks
+  tokenizer_id: google/gemma-2-2b
+  tokenizer_revision: "c5ebcd40d208330abc697524c919956e692655cf"  # pinned 2026-08-30 HEAD of google/gemma-2-2b (HF-verified)
+  bos_policy: prepend_each_block
+  sequence_packing: concatenate
+  sae_release: gemma-scope-2b-pt-res
+  sae_id: layer_12/width_16k/average_l0_82   # paper says "canonical" without an L0; registry has only {22,41,82,176,445} -> closest available
+  sae_revision: "fd571b47c1c64851e9b1989792367b9babb4af63"  # pinned 2026-08-30 HEAD of google/gemma-scope-2b-pt-res (HF-verified)
+
+model_config:
+  model:
+    name: google/gemma-2-2b
+    # bfloat16, NOT float16. Gemma-2 is a bfloat16-native model with large
+    # residual-stream activations that OVERFLOW float16's 65504 range (→ inf/clip).
+    # Overflowed activations are robust to weight quantization, spuriously
+    # inflating both the SAE active-feature count (9,977 vs paper 7,144) and
+    # survival (INT6 98.77% vs 51.30%). Duan 2606.03002 runs Gemma in bfloat16
+    # (App. D). After no_processing fixed perplexity to match the paper, dtype is
+    # the sole remaining documented difference.
+    dtype: bfloat16
+    device: cuda
+    # Load with from_pretrained_no_processing (fold_ln/centering off). Duan
+    # 2606.03002 quantizes the RAW HF projection weights; default TransformerLens
+    # folds the RMSNorm scales into W_Q/.../W_out before we quantize, applying a
+    # milder-than-paper perturbation (our INT6 stayed ~94% survived vs 51.3%).
+    # no_processing quantizes the raw weights and keeps resid_post closest to the
+    # HF model the Gemma Scope SAE was trained on. Leading hypothesis for the
+    # residual Gate-1 gap after the BOS fix.
+    no_processing: true
+  sae:
+    release: gemma-scope-2b-pt-res
+    sae_id: layer_12/width_16k/average_l0_82
+    d_sae: 16384
+    layer: 12
+    hook: blocks.12.hook_resid_post
+    # Drop the prepended BOS position from firing/correlation analysis. Gemma-2's
+    # BOS is an attention-sink outlier that inflates the active-feature count and
+    # per-feature survival; excluding it is the leading hypothesis for the 44pp
+    # Gate-1 miss (n_active 12,013 vs the paper's 7,144 on the exact protocol).
+    exclude_bos: true
+  corpus:
+    behavioral: wikitext-2-raw
+    activation: wikitext-2-raw
+  perplexity:
+    sliding_window_size: 2048   # Duan App. D: Gemma sliding-window check W=2048
+    stride: 512                 # Duan App. D: stride S=512
+    activation_seq_len: 256     # Duan 2606.03002 §3.8/App. K/H: Gemma QDM block length L=256
+    seq_len: 512
+    n_tokens: 500000
+    ppl_max_tokens: 100000
+
+quant_config:
+  gate_sae_int6:
+    bits: 6
+    survived_target: 51.30
+    degraded_target: 48.70
+    damaged_target: 0.00
+    tolerance_pp: 3.0

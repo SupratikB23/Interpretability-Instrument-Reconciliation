@@ -1,0 +1,244 @@
+# Harmonized substrate — FLAT-STREAM (no-BOS) SAE protocol (2026-09-10).
+#
+# Separate copy of common_gemma2_2b_corrected.yaml; nothing is edited in place.
+# This is the SENSITIVE regime that REPRODUCES Duan 2606.03002 (INT6 ~55% survival,
+# n_active ~7.1k): the 2026-09-09 BOS isolation showed
+# the whole 47pp gap is the forward-pass BOS attention sink, not tokenization.
+# Removing the BOS entirely (flat_stream) lands on the paper.
+#
+# Differences vs. _corrected (the ~98.7% BOS-present substrate, kept as-is):
+#   - sequence_packing: duan_exact   ("\n\n".join -> encode once -> L=256 blocks)
+#   - bos_policy: flat_stream         (NO BOS anywhere in the forward pass)
+#   - sae.exclude_bos: false          (flat_stream has no BOS row to drop; the
+#                                       pipeline RAISES on exclude_bos+flat_stream)
+#   - sae.encode_float32: true        (matches Duan's sae.encode(acts.float()))
+#   - quant_config.results.root: results/novelty_flat_stream  (fully isolated tree)
+#
+# Only the SAE arm reads these knobs (verified: they appear only in src/sae/), so
+# probes / circuits / patching are byte-for-byte identical to the _corrected run
+# and are relocated by copy, not re-run. Outputs land under
+# results/novelty_flat_stream/ and never touch the earlier results/harmonized/ or
+# results/reproduction/ trees.
+
+mode: harmonized
+schema_version: 1
+
+seeds: [0, 1, 2, 3, 4]
+
+model:
+  identifier: google/gemma-2-2b
+  tokenizer_identifier: google/gemma-2-2b
+  revision: main
+
+readout:
+  hook: blocks.12.hook_resid_post
+  layer: 12
+
+compression:
+  method: RTN
+  scheme: per_output_channel
+  bit_widths: [8, 7, 6, 5, 4]
+  quantized_modules:
+    - attn_q
+    - attn_k
+    - attn_v
+    - attn_o
+    - mlp_in
+    - mlp_out
+    - mlp_gate
+  excluded_modules:
+    - embed
+    - unembed
+    - layer_norm
+    - bias
+  expected_rtn_module_counts:
+    attn_q: 26
+    attn_k: 26
+    attn_v: 26
+    attn_o: 26
+    mlp_in: 26
+    mlp_out: 26
+    mlp_gate: 26
+
+datasets:
+  harmfulness:
+    identifier: allenai/wildguardmix
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/allenai/wildguardmix
+  privacy:
+    identifier: Isotonic/pii-masking-200k
+    revision: 1f3f98a2961b904160fe12e2dfc22f8ab0ba33d2
+    split: train
+    source: https://huggingface.co/datasets
+  refusal:
+    identifier: walledai/XSTest
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets
+
+corpora:
+  # SAE activation corpus: WikiText-2-raw train (the documented sensitive protocol).
+  activation:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/wikitext
+  behavioral:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets/wikitext
+
+budgets:
+  dry_run:
+    max_examples: 16
+    max_tokens: 4096
+  smoke:
+    max_examples: 128
+    max_tokens: 16384
+  full:
+    max_examples: 10000
+    max_tokens: 500000
+
+statistics:
+  confidence_level: 0.95
+  bootstrap:
+    unit: probe_cell
+    n_resamples: 1000
+  permutation:
+    n_resamples: 1000
+  multiple_testing:
+    method: none
+
+spr:
+  signal_statistic: peak_abs_projection
+  perturbation_statistic: mean_abs_directional_delta
+  preregistered_estimator: peak_abs_projection/mean_abs_directional_delta
+  eps: 1.0e-8
+
+circuits:
+  backend: transformerlens
+  transcoder_set: mntss/gemma-scope-transcoders
+  prompts:
+    - "The capital of France is"
+    - "The capital of Japan is"
+
+patching:
+  prompts:
+    clean: "The capital of France is"
+    corrupted: "The capital of Japan is"
+  components: [blocks.12.hook_resid_post]
+  positive_token: " Paris"
+  negative_token: " Tokyo"
+
+# Provenance = Duan-exact flat-stream token protocol (no BOS in the forward pass).
+provenance:
+  corpus_id: wikitext
+  corpus_config: wikitext-2-raw-v1
+  corpus_split: train
+  corpus_revision: null
+  tokenization_protocol: duan_exact_join_encode_once_no_bos
+  tokenizer_id: google/gemma-2-2b
+  tokenizer_revision: null
+  bos_policy: flat_stream
+  sequence_packing: duan_exact
+
+model_config:
+  model:
+    name: google/gemma-2-2b
+    dtype: bfloat16
+    device: cuda
+    no_processing: true
+  readout:
+    hook: blocks.12.hook_resid_post
+    layer: 12
+  probe:
+    layers: [12]
+    comparison_layer: 12
+    n_seeds: 5
+    base_auc_eligibility: 0.75
+    big_drop_auc_threshold: 0.05
+    operational_failure_auc: 0.70
+    test_size: 0.2
+    batch_size: 4
+    monitors: [harmfulness, privacy, refusal]
+    datasets:
+      harmfulness:
+        dataset_id: allenai/wildguardmix
+        config: wildguardtrain
+        split: train
+        text_field: prompt
+        label_field: prompt_harm_label
+        label_map: { unharmful: 0, harmful: 1 }
+        filtering: { drop_null_labels: true }
+      privacy:
+        dataset_id: Isotonic/pii-masking-200k
+        split: train
+        revision: 1f3f98a2961b904160fe12e2dfc22f8ab0ba33d2
+        label_construction: paired_fields
+        negative_text_field: masked_text
+        positive_text_field: unmasked_text
+      refusal:
+        dataset_id: walledai/XSTest
+        split: test
+        text_field: prompt
+        label_field: label
+        label_map: { safe: 0, unsafe: 1 }
+  sae:
+    release: gemma-scope-2b-pt-res
+    sae_id: layer_12/width_16k/average_l0_82
+    d_sae: 16384
+    layer: 12
+    hook: blocks.12.hook_resid_post
+    # flat_stream has NO BOS -> position 0 is real content -> exclude_bos MUST be
+    # false (the pipeline raises if flat_stream + exclude_bos are combined).
+    exclude_bos: false
+    # Match Duan's sae.encode(acts.float()).
+    encode_float32: true
+  corpus:
+    behavioral: wikitext-2-raw
+    activation: wikitext-2-raw
+  perplexity:
+    sliding_window_size: 512
+    stride: 256
+    seq_len: 512
+    activation_seq_len: 256
+    n_tokens: 500000
+    ppl_max_tokens: 100000
+
+quant_config:
+  # Fully isolated results tree: every artifact rerooted under
+  # results/novelty_flat_stream/ so this run cannot overwrite results/harmonized/
+  # (the BOS-present novelty, PART 2/4) or results/reproduction/. results/ is gitignored.
+  results:
+    root: "results/novelty_flat_stream"
+    sae_survival: "results/novelty_flat_stream/harmonized/sae/survival_rates.csv"
+    sae_correlations: "results/novelty_flat_stream/harmonized/sae/correlations_int6.npz"
+    sae_perplexity: "results/novelty_flat_stream/harmonized/sae/perplexity.csv"
+    sae_metadata: "results/novelty_flat_stream/harmonized/sae/metadata.json"
+    sae_gate_report: "results/novelty_flat_stream/harmonized/sae/reproduction_gate.json"
+    probe_auc: "results/novelty_flat_stream/harmonized/probes/auc_calibration.csv"
+    circuit_stability: "results/novelty_flat_stream/harmonized/circuits/edge_stability.csv"
+    patching: "results/novelty_flat_stream/harmonized/patching/nie_pie.csv"
+    spr_within: "results/novelty_flat_stream/harmonized/spr/within_instrument.json"
+    spr: "results/novelty_flat_stream/harmonized/spr/transfer_results.json"
+  compression:
+    operator: rtn
+    scheme: per_output_channel
+    bit_widths: [8, 7, 6, 5, 4]
+    quant_modules:
+      attn_q: [q_proj, W_Q]
+      attn_k: [k_proj, W_K]
+      attn_v: [v_proj, W_V]
+      attn_o: [o_proj, W_O]
+      mlp_in: [up_proj, W_in]
+      mlp_out: [down_proj, W_out]
+      mlp_gate: [gate_proj, W_gate]
+    skip_modules:
+      embed: [embed, wte, token_embedding]
+      unembed: [lm_head, unembed, w_u, final_proj]
+      ln: [layernorm, layer_norm, ln, norm]
+      bias: [bias]

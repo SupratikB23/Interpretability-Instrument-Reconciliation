@@ -1,0 +1,224 @@
+# Harmonized R1 substrate — CORRECTED SAE protocol (2026-09-06).
+#
+# Separate copy of common_gemma2_2b.yaml so nothing is edited in place. It bundles
+# every verified SAE-arm fix from the reproduction debugging so the SAE is a
+# *sensitive* instrument for the four-instrument / SPR novelty:
+#   - dtype: bfloat16            (Gemma-2 native; float16 overflows large acts)
+#   - model.no_processing: true  (quantize RAW HF weights; perplexity matched the paper)
+#   - sae.exclude_bos: true      (drop the BOS attention-sink outlier)
+#   - activation corpus: WikiText-2-raw + concatenate + L=256 (Duan 2606.03002 App. K)
+#
+# vs. the original common_gemma2_2b.yaml (kept as-is): fp16 + folded weights +
+# FineWeb-Edu + per-document. Use THIS file for harmonized-sae / divergence /
+# circuits / patching / spr from now on. Probes are unaffected by these SAE
+# settings (they read their own safety datasets), and harmonized-probes is
+# already done — do NOT redo it.
+#
+# NOTE: even with all fixes the SAE INT6 survival is ~98.7% (vs Duan's 51.3%);
+# the divergence on THIS pipeline appears at INT5 (SAE ~22% non-survival while
+# probes stay robust).
+
+mode: harmonized
+schema_version: 1
+
+seeds: [0, 1, 2, 3, 4]
+
+model:
+  identifier: google/gemma-2-2b
+  tokenizer_identifier: google/gemma-2-2b
+  revision: main
+
+readout:
+  hook: blocks.12.hook_resid_post
+  layer: 12
+
+compression:
+  method: RTN
+  scheme: per_output_channel
+  bit_widths: [8, 7, 6, 5, 4]
+  quantized_modules:
+    - attn_q
+    - attn_k
+    - attn_v
+    - attn_o
+    - mlp_in
+    - mlp_out
+    - mlp_gate
+  excluded_modules:
+    - embed
+    - unembed
+    - layer_norm
+    - bias
+  expected_rtn_module_counts:
+    attn_q: 26
+    attn_k: 26
+    attn_v: 26
+    attn_o: 26
+    mlp_in: 26
+    mlp_out: 26
+    mlp_gate: 26
+
+datasets:
+  harmfulness:
+    identifier: allenai/wildguardmix
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/allenai/wildguardmix
+  privacy:
+    identifier: Isotonic/pii-masking-200k
+    revision: 1f3f98a2961b904160fe12e2dfc22f8ab0ba33d2
+    split: train
+    source: https://huggingface.co/datasets
+  refusal:
+    identifier: walledai/XSTest
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets
+
+corpora:
+  # SAE activation corpus switched to WikiText-2-raw (the protocol where the SAE
+  # is most sensitive / documented). Must stay consistent with provenance below.
+  activation:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/wikitext
+  behavioral:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets/wikitext
+
+budgets:
+  dry_run:
+    max_examples: 16
+    max_tokens: 4096
+  smoke:
+    max_examples: 128
+    max_tokens: 16384
+  full:
+    max_examples: 10000
+    max_tokens: 500000
+
+statistics:
+  confidence_level: 0.95
+  bootstrap:
+    unit: probe_cell
+    n_resamples: 1000
+  permutation:
+    n_resamples: 1000
+  multiple_testing:
+    method: none
+
+spr:
+  signal_statistic: peak_abs_projection
+  perturbation_statistic: mean_abs_directional_delta
+  preregistered_estimator: peak_abs_projection/mean_abs_directional_delta
+  eps: 1.0e-8
+
+circuits:
+  backend: transformerlens
+  transcoder_set: mntss/gemma-scope-transcoders
+  prompts:
+    - "The capital of France is"
+    - "The capital of Japan is"
+
+patching:
+  prompts:
+    clean: "The capital of France is"
+    corrupted: "The capital of Japan is"
+  components: [blocks.12.hook_resid_post]
+  positive_token: " Paris"
+  negative_token: " Tokyo"
+
+# Provenance updated to WikiText + concatenate + L=256 (matches corpora.activation).
+provenance:
+  corpus_id: wikitext
+  corpus_config: wikitext-2-raw-v1
+  corpus_split: train
+  corpus_revision: null
+  tokenization_protocol: concatenate_lines_fixed_blocks
+  tokenizer_id: google/gemma-2-2b
+  tokenizer_revision: null
+  bos_policy: prepend_each_block
+  sequence_packing: concatenate
+
+model_config:
+  model:
+    name: google/gemma-2-2b
+    dtype: bfloat16
+    device: cuda
+    no_processing: true
+  readout:
+    hook: blocks.12.hook_resid_post
+    layer: 12
+  probe:
+    layers: [12]
+    comparison_layer: 12
+    n_seeds: 5
+    base_auc_eligibility: 0.75
+    big_drop_auc_threshold: 0.05
+    operational_failure_auc: 0.70
+    test_size: 0.2
+    batch_size: 4
+    monitors: [harmfulness, privacy, refusal]
+    datasets:
+      harmfulness:
+        dataset_id: allenai/wildguardmix
+        config: wildguardtrain
+        split: train
+        text_field: prompt
+        label_field: prompt_harm_label
+        label_map: { unharmful: 0, harmful: 1 }
+        filtering: { drop_null_labels: true }
+      privacy:
+        dataset_id: Isotonic/pii-masking-200k
+        split: train
+        revision: 1f3f98a2961b904160fe12e2dfc22f8ab0ba33d2
+        label_construction: paired_fields
+        negative_text_field: masked_text
+        positive_text_field: unmasked_text
+      refusal:
+        dataset_id: walledai/XSTest
+        split: test
+        text_field: prompt
+        label_field: label
+        label_map: { safe: 0, unsafe: 1 }
+  sae:
+    release: gemma-scope-2b-pt-res
+    sae_id: layer_12/width_16k/average_l0_82
+    d_sae: 16384
+    layer: 12
+    hook: blocks.12.hook_resid_post
+    exclude_bos: true
+  corpus:
+    behavioral: wikitext-2-raw
+    activation: wikitext-2-raw
+  perplexity:
+    sliding_window_size: 512
+    stride: 256
+    seq_len: 512
+    activation_seq_len: 256
+    n_tokens: 500000
+    ppl_max_tokens: 100000
+
+quant_config:
+  compression:
+    operator: rtn
+    scheme: per_output_channel
+    bit_widths: [8, 7, 6, 5, 4]
+    quant_modules:
+      attn_q: [q_proj, W_Q]
+      attn_k: [k_proj, W_K]
+      attn_v: [v_proj, W_V]
+      attn_o: [o_proj, W_O]
+      mlp_in: [up_proj, W_in]
+      mlp_out: [down_proj, W_out]
+      mlp_gate: [gate_proj, W_gate]
+    skip_modules:
+      embed: [embed, wte, token_embedding]
+      unembed: [lm_head, unembed, w_u, final_proj]
+      ln: [layernorm, layer_norm, ln, norm]
+      bias: [bias]

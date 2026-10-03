@@ -1,0 +1,50 @@
+# =============================================================================
+# R1 — Instrument Reconciliation : Python dependencies
+# =============================================================================
+# Python >= 3.10 (developed on 3.12).
+#
+# IMPORTANT — GPU (torch must be a CUDA build; the default pin below is CPU-only
+# on some platforms). For the 3070, install torch with CUDA first, e.g.:
+#
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# If a CPU-only torch is already present, remove it first:
+#     pip uninstall -y torch torchvision
+#
+# VERSION NOTES (verified working as a set on this repo):
+#   - transformers MUST stay on 4.57.x: circuit-tracer pins `<=4.57.3`, and
+#     transformers 5.x removes `FLAX_WEIGHTS_NAME`, breaking sae_lens.
+#   - transformer_lens MUST stay <3.0 (`>=2.16,<3.0`): 3.x requires
+#     transformers>=5.9, which conflicts with the 4.57.x pin above.
+# -----------------------------------------------------------------------------
+
+# Core (pure math / sklearn / torch)
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+PyYAML>=6.0
+
+# Model / SAE stack (reuse, do not reinvent)
+transformers==4.57.3
+transformer_lens>=2.16,<3.0
+sae_lens>=4.0
+einops>=0.8.0
+sentencepiece>=0.1.99
+tokenizers>=0.21.0
+safetensors>=0.5.0
+accelerate>=0.31
+huggingface_hub>=0.26,<1.0
+
+# Circuit discovery backbone — Anthropic circuit-tracer (NOT on PyPI).
+# Download it from GitHub and install it separately:
+#     pip install git+https://github.com/safety-research/circuit-tracer.git
+nnsight==0.6.1
+seaborn>=0.13.2
+pydantic>=2.0.0
+
+# Corpus loading
+datasets>=2.18
+
+# Dev / test
+pytest>=8.0
+ruff>=0.12

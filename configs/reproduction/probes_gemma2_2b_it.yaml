@@ -1,0 +1,155 @@
+# Probe-arm reproduction profile.
+#
+# Goal: reproduce Duan 2606.15980's quantization big-drop rate (0.83–3.33%,
+# zero operational failures) for linear monitors. R1 re-runs the probe arm under
+# RTN instead of bnb/GPTQ/AWQ, so this gate is directional + order-of-magnitude,
+# not exact (see configs/quant_rtn_sweep.yaml gate_probe).
+
+mode: reproduction
+schema_version: 1
+
+seeds: [0, 1, 2, 3, 4]
+
+model:
+  identifier: google/gemma-2-2b-it
+  tokenizer_identifier: google/gemma-2-2b-it
+  revision: main
+
+readout:
+  hook: blocks.12.hook_resid_post
+  layer: 12
+
+compression:
+  method: RTN
+  scheme: per_output_channel
+  bit_widths: [8, 7, 6, 5, 4]
+  quantized_modules:
+    - attn_q
+    - attn_k
+    - attn_v
+    - attn_o
+    - mlp_in
+    - mlp_out
+    - mlp_gate
+  excluded_modules:
+    - embed
+    - unembed
+    - layer_norm
+    - bias
+  expected_rtn_module_counts:
+    attn_q: 26
+    attn_k: 26
+    attn_v: 26
+    attn_o: 26
+    mlp_in: 26
+    mlp_out: 26
+    mlp_gate: 26
+
+datasets:
+  harmfulness:
+    identifier: allenai/wildguardmix
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/allenai/wildguardmix
+  privacy:
+    identifier: Isotonic/pii-masking-200k
+    revision: 1f3f98a2961b904160fe12e2dfc22f8ab0ba33d2
+    split: train
+    source: https://huggingface.co/datasets/Isotonic/pii-masking-200k
+  refusal:
+    identifier: walledai/XSTest
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets/walledai/XSTest
+
+corpora:
+  behavioral:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets/wikitext
+
+budgets:
+  dry_run:
+    max_examples: 16
+    max_tokens: 4096
+  smoke:
+    max_examples: 128
+    max_tokens: 16384
+  full:
+    max_examples: 100000
+    max_tokens: 500000
+
+statistics:
+  confidence_level: 0.95
+  bootstrap:
+    unit: probe_cell
+    n_resamples: 1000
+  permutation:
+    n_resamples: 1000
+  multiple_testing:
+    method: none
+
+spr:
+  signal_statistic: peak_abs_projection
+  perturbation_statistic: mean_abs_directional_delta
+  preregistered_estimator: peak_abs_projection/mean_abs_directional_delta
+  eps: 1.0e-8
+
+model_config:
+  model:
+    name: google/gemma-2-2b-it
+    dtype: float16
+    device: cuda
+  probe:
+    layers: [4, 8, 12, 16, 20, 24]
+    comparison_layer: 12
+    n_seeds: 5
+    base_auc_eligibility: 0.75
+    big_drop_auc_threshold: 0.05
+    operational_failure_auc: 0.70
+    test_size: 0.2
+    # 4 for the 8 GB RTX 3070: this profile caches 6 layers ({4,8,12,16,20,24})
+    # on gemma-2-2b-it. stop_at_layer=25 already avoids the 256k-vocab logits;
+    # batch 4 keeps a conservative floor. Equivalent to single-example extraction.
+    batch_size: 4
+    # The source high-stakes generator is not available in this repository;
+    # excluding it is more honest than calling a synthetic approximation source reproduction.
+    monitors: [harmfulness, privacy, refusal]
+    source_protocol_exact: false
+    protocol_label: source_reference_validation_rtn
+    datasets:
+      harmfulness:
+        dataset_id: allenai/wildguardmix
+        config: wildguardtrain
+        split: train
+        text_field: prompt
+        label_field: prompt_harm_label
+        label_map: { unharmful: 0, harmful: 1 }
+        filtering: { drop_null_labels: true }
+      privacy:
+        dataset_id: Isotonic/pii-masking-200k
+        revision: 1f3f98a2961b904160fe12e2dfc22f8ab0ba33d2
+        split: train
+        label_construction: paired_fields
+        negative_text_field: masked_text
+        positive_text_field: unmasked_text
+      refusal:
+        dataset_id: walledai/XSTest
+        split: test
+        text_field: prompt
+        # 'type' holds category names (homonyms, ...); safe/unsafe is in 'label'.
+        label_field: label
+        label_map: { safe: 0, unsafe: 1 }
+
+quant_config:
+  gate_probe:
+    reference_big_drop_rate_min: 0.0083
+    reference_big_drop_rate_max: 0.0333
+    # Strict reproduction gate: observed big-drop rate must fall
+    # inside the reference interval; no order-of-magnitude acceptance band.
+    min_eligible_count: 1
+    min_eligible_coverage: 0.5
+    max_operational_failures: 0
+    require_reference_interval: true

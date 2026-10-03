@@ -1,0 +1,1 @@
+"""RTN compression arm (Duan 2606.03002 §3.2 Eq. 2)."""

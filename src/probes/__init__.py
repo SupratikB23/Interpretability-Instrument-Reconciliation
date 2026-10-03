@@ -1,0 +1,1 @@
+"""Linear probe arm (2606.15980, re-run under RTN)."""

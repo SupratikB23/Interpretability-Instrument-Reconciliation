@@ -1,0 +1,246 @@
+# Harmonized R1 common-substrate profile.
+#
+# A single model/layer/compression substrate shared by all four instruments so
+# they can be directly compared. This is NOT a reproduction of either prior
+# paper: it deliberately swaps the probe arm onto the same RTN sweep used for
+# the SAE arm (Duan 2606.15980 originally used bnb/GPTQ/AWQ). Never label this
+# output a "reproduction".
+#
+# Load via ``Config.from_experiment("configs/harmonized/common_gemma2_2b.yaml")``.
+# ``model_config``/``quant_config`` deep-merge over the legacy
+# configs/model_gemma2_2b.yaml + configs/quant_rtn_sweep.yaml so existing
+# drivers consuming ``cfg.model``/``cfg.quant`` keep working.
+
+mode: harmonized
+schema_version: 1
+
+seeds: [0, 1, 2, 3, 4]
+
+model:
+  identifier: google/gemma-2-2b
+  tokenizer_identifier: google/gemma-2-2b
+  revision: main
+
+readout:
+  hook: blocks.12.hook_resid_post
+  layer: 12
+
+compression:
+  method: RTN
+  scheme: per_output_channel
+  bit_widths: [8, 7, 6, 5, 4]
+  quantized_modules:
+    - attn_q
+    - attn_k
+    - attn_v
+    - attn_o
+    - mlp_in
+    - mlp_out
+    - mlp_gate
+  excluded_modules:
+    - embed
+    - unembed
+    - layer_norm
+    - bias
+  expected_rtn_module_counts:
+    attn_q: 26
+    attn_k: 26
+    attn_v: 26
+    attn_o: 26
+    mlp_in: 26
+    mlp_out: 26
+    mlp_gate: 26
+
+datasets:
+  harmfulness:
+    identifier: allenai/wildguardmix
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/allenai/wildguardmix
+  privacy:
+    identifier: Isotonic/pii-masking-200k
+    revision: 1f3f98a2961b904160fe12e2dfc22f8ab0ba33d2
+    split: train
+    source: https://huggingface.co/datasets
+  refusal:
+    identifier: walledai/XSTest
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets
+
+corpora:
+  activation:
+    identifier: HuggingFaceFW/fineweb-edu
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
+  behavioral:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets/wikitext
+
+budgets:
+  dry_run:
+    max_examples: 16
+    max_tokens: 4096
+  smoke:
+    max_examples: 128
+    max_tokens: 16384
+  full:
+    # max_examples caps the PROBE arm's per-monitor example count (max_tokens is
+    # the SAE arm's token budget — unchanged at 500k). 10000 is ample for
+    # logistic probes (they converge with a few thousand) and gives ~2000-example
+    # test sets per monitor — statistically solid for ΔAUC and the divergence gate.
+    # At 100000 the probe sweep is ~1.1M Gemma forwards (hours, and 4x longer at
+    # batch_size 4). Raise back to 100000 only for a final publication run, ideally
+    # at a larger batch_size on a bigger GPU. (OPEN QUESTION —
+    # harmonized probe example count is not a reproduction target.)
+    max_examples: 10000
+    max_tokens: 500000
+
+statistics:
+  confidence_level: 0.95
+  bootstrap:
+    unit: probe_cell
+    n_resamples: 1000
+  permutation:
+    n_resamples: 1000
+  multiple_testing:
+    method: none
+
+spr:
+  signal_statistic: peak_abs_projection
+  perturbation_statistic: mean_abs_directional_delta
+  preregistered_estimator: peak_abs_projection/mean_abs_directional_delta
+  eps: 1.0e-8
+
+# Production circuit-tracer inputs. These are actual prompts and the real
+# GemmaScope-transcoder release accepted by circuit-tracer 0.5.2; edit them in
+# the protocol record before a scientific scale-up, never in code.
+circuits:
+  backend: transformerlens
+  transcoder_set: mntss/gemma-scope-transcoders
+  prompts:
+    - "The capital of France is"
+    - "The capital of Japan is"
+
+patching:
+  # Same-length factual prompts keep hook tensors aligned for clean/noised and
+  # corrupted/denoised counterfactuals. The hook is the common R1 readout site.
+  prompts:
+    clean: "The capital of France is"
+    corrupted: "The capital of Japan is"
+  components: [blocks.12.hook_resid_post]
+  positive_token: " Paris"
+  negative_token: " Tokyo"
+
+# Common-corpus identity for harmonized R1 runs (src/sae/protocol.py::
+# HarmonizedProvenance). This is a configured comparison substrate, never a
+# reproduction claim; revision fields may stay null here.
+provenance:
+  corpus_id: HuggingFaceFW/fineweb-edu
+  corpus_config: sample-10BT
+  corpus_split: train
+  corpus_revision: null
+  tokenization_protocol: per_document_bos_truncate
+  tokenizer_id: google/gemma-2-2b
+  tokenizer_revision: null
+  bos_policy: prepend_each_document
+  sequence_packing: none
+
+# Deep-merged sin the legacy driver view. The probe datasets here are full dict
+# specs (dataset_id/split/text_field/label_field/label_map) — the format
+# src/probes/train_eval.py::load_probe_dataset actually consumes. These are
+# harmonized defaults; the exact monitor-column decisions remain flagged as
+# open questions.
+model_config:
+  model:
+    name: google/gemma-2-2b
+    dtype: float16
+    device: cuda
+  readout:
+    hook: blocks.12.hook_resid_post
+    layer: 12
+  probe:
+    layers: [12]
+    comparison_layer: 12
+    n_seeds: 5
+    base_auc_eligibility: 0.75
+    big_drop_auc_threshold: 0.05
+    operational_failure_auc: 0.70
+    test_size: 0.2
+    # 4 for the 8 GB RTX 3070: with stop_at_layer the OOM (full 256k-vocab logits)
+    # is already gone, so 16 would fit — but 4 is a conservative floor that leaves
+    # maximum headroom against fragmentation on Windows/WDDM. Batched extraction is
+    # proven equivalent to single-example (test_batching), so this changes only
+    # peak memory, never results. Trade-off: ~4x more forward passes than 16, so
+    # if the full 100k-example budget is too slow, lower budgets.full.max_examples
+    # (e.g. to 10000 — ample for logistic probes) rather than raising this back up.
+    batch_size: 4
+    # The unpublished high-stakes construction is deliberately excluded until
+    # its source generator is versioned; it must never masquerade as a source run.
+    monitors: [harmfulness, privacy, refusal]
+    datasets:
+      harmfulness:
+        dataset_id: allenai/wildguardmix
+        config: wildguardtrain
+        split: train
+        text_field: prompt
+        label_field: prompt_harm_label
+        label_map: { unharmful: 0, harmful: 1 }
+        filtering: { drop_null_labels: true }
+      privacy:
+        dataset_id: Isotonic/pii-masking-200k
+        split: train
+        revision: 1f3f98a2961b904160fe12e2dfc22f8ab0ba33d2
+        # Each source row yields a PII-free masked text (0) and its matching
+        # unmasked PII-bearing text (1); this is explicit and reproducible.
+        label_construction: paired_fields
+        negative_text_field: masked_text
+        positive_text_field: unmasked_text
+      refusal:
+        dataset_id: walledai/XSTest
+        split: test
+        text_field: prompt
+        # XSTest's 'type' column holds category names (homonyms, figurative_
+        # language, ...); the binary safe/unsafe ground truth lives in 'label'.
+        # This generic mapping is verified by the dataset-audit command before
+        # training and fails on schema drift.
+        label_field: label
+        label_map: { safe: 0, unsafe: 1 }
+  sae:
+    release: gemma-scope-2b-pt-res
+    sae_id: layer_12/width_16k/average_l0_82
+    d_sae: 16384
+    layer: 12
+    hook: blocks.12.hook_resid_post
+  corpus:
+    behavioral: wikitext-2-raw
+    activation: fineweb-edu-subset
+  perplexity:
+    sliding_window_size: 512
+    stride: 256
+    seq_len: 512
+    n_tokens: 500000
+    ppl_max_tokens: 100000
+
+quant_config:
+  compression:
+    operator: rtn
+    scheme: per_output_channel
+    bit_widths: [8, 7, 6, 5, 4]
+    quant_modules:
+      attn_q: [q_proj, W_Q]
+      attn_k: [k_proj, W_K]
+      attn_v: [v_proj, W_V]
+      attn_o: [o_proj, W_O]
+      mlp_in: [up_proj, W_in]
+      mlp_out: [down_proj, W_out]
+      mlp_gate: [gate_proj, W_gate]
+    skip_modules:
+      embed: [embed, wte, token_embedding]
+      unembed: [lm_head, unembed, w_u, final_proj]
+      ln: [layernorm, layer_norm, ln, norm]
+      bias: [bias]

@@ -1,0 +1,69 @@
+# Secondary/robustness model
+# Pythia-70M-deduped matches Duan 2606.03002's cross-scale check (Pythia-70M row,
+# SAE at blocks.4.hook_resid_post) and is the cheap iteration model for the pilot
+# (compute-budget open question).
+model:
+  name: "EleutherAI/pythia-70m-deduped"
+  family: "pythia"
+  n_params: 7.0e7
+  dtype: "float32"
+  device: "cuda"
+
+readout:
+  hook: "blocks.4.hook_resid_post"     # SAE site per 2606.03002
+  layer: 4
+
+probe:
+  layers: [4]
+  comparison_layer: 4
+  n_seeds: 5
+  base_auc_eligibility: 0.75
+  big_drop_auc_threshold: 0.05
+  operational_failure_auc: 0.70
+  test_size: 0.2
+  monitors: ["harmfulness", "privacy", "refusal", "high_stakes"]
+  # OPEN QUESTION: — same unresolved dataset provenance as the
+  # Gemma config; dict specs are the contract load_probe_dataset consumes.
+  datasets:
+    harmfulness:
+      dataset_id: "allenai/wildguardmix"
+      split: "train"
+      text_field: "prompt"
+      label_field: "harm_label"
+      label_map: { "benign": 0, "harmful": 1 }
+    privacy:
+      dataset_id: "pii/pii-masking-200k"
+      split: "train"
+      text_field: "prompt"
+      label_field: "has_pii"
+      label_map: { "no": 0, "yes": 1 }
+    refusal:
+      dataset_id: "should/should"
+      split: "test"
+      text_field: "prompt"
+      label_field: "is_refusal"
+      label_map: { "compliant": 0, "refusal": 1 }
+    high_stakes:
+      dataset_id: "synthetic/high-stakes-monitor"
+      split: "test"
+      text_field: "prompt"
+      label_field: "label"
+      label_map: { "safe": 0, "unsafe": 1 }
+
+sae:
+  release: "pythia-70m-deduped-res-sm" # checkpoint used by 2606.03002's Pythia row
+  sae_id: "blocks.4.hook_resid_post"
+  d_sae: 32768
+  layer: 4
+  hook: "blocks.4.hook_resid_post"
+
+corpus:
+  behavioral: "wikitext-2-raw"
+  activation: "fineweb-edu-subset"
+
+perplexity:
+  sliding_window_size: 512
+  stride: 256
+  seq_len: 512
+  n_tokens: 500000
+  ppl_max_tokens: 100000

@@ -1,0 +1,161 @@
+# SAE-arm ISOLATION config — tokenization lever only (2026-09-08).
+#
+# Holds everything at the Duan-exact reproduction EXCEPT the BOS handling: uses
+# THEIR tokenization (sequence_packing: duan_exact — "\n\n".join + encode-once)
+# but KEEPS a BOS prepended per block (bos_policy: prepend_each_block,
+# exclude_bos:true), exactly like our existing corrected run.
+#
+# Purpose: compared with the existing corrected run (concatenate +
+# prepend_each_block, our ~98.7%), this changes ONLY the tokenization protocol.
+# If survival collapses toward ~51% here, the join+encode-once tokenization is the
+# driver. If it stays ~98%, the driver is the BOS (see sae_gemma2_2b_isolate_bos).
+# encode_float32 is held true (matches the repo, immaterial) so it is not a
+# confound across the isolation set.
+
+mode: reproduction
+schema_version: 1
+
+seeds: [0]
+
+model:
+  identifier: google/gemma-2-2b
+  tokenizer_identifier: google/gemma-2-2b
+  revision: main
+
+readout:
+  hook: blocks.12.hook_resid_post
+  layer: 12
+
+compression:
+  method: RTN
+  scheme: per_output_channel
+  bit_widths: [8, 7, 6, 5, 4]
+  quantized_modules:
+    - attn_q
+    - attn_k
+    - attn_v
+    - attn_o
+    - mlp_in
+    - mlp_out
+    - mlp_gate
+  excluded_modules:
+    - embed
+    - unembed
+    - layer_norm
+    - bias
+  expected_rtn_module_counts:
+    attn_q: 26
+    attn_k: 26
+    attn_v: 26
+    attn_o: 26
+    mlp_in: 26
+    mlp_out: 26
+    mlp_gate: 26
+
+datasets:
+  harmfulness:
+    identifier: allenai/wildguardmix
+    revision: main
+    split: train
+    source: https://huggingface.co/datasets/allenai/wildguardmix
+
+corpora:
+  activation:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: "b08601e04326c79dfdd32d625aee71d232d685c3"
+    split: train
+    streaming: false
+    source: https://huggingface.co/datasets/wikitext
+  behavioral:
+    identifier: wikitext
+    config: wikitext-2-raw-v1
+    revision: main
+    split: test
+    source: https://huggingface.co/datasets/wikitext
+
+budgets:
+  dry_run:
+    max_examples: 16
+    max_tokens: 4096
+  smoke:
+    max_examples: 64
+    max_tokens: 8192
+  full:
+    max_examples: 100000
+    max_tokens: 500000
+
+statistics:
+  confidence_level: 0.95
+  bootstrap:
+    unit: sae_feature
+    n_resamples: 1000
+  permutation:
+    n_resamples: 1000
+  multiple_testing:
+    method: none
+
+spr:
+  signal_statistic: peak_abs_projection
+  perturbation_statistic: mean_abs_directional_delta
+  preregistered_estimator: peak_abs_projection/mean_abs_directional_delta
+  eps: 1.0e-8
+
+provenance:
+  source_reference: "Duan, E. (2026). arXiv:2606.03002v2; isolation config (tokenization lever): repo join+encode-once tokenization WITH a per-block BOS."
+  corpus_id: wikitext
+  corpus_config: wikitext-2-raw-v1
+  corpus_split: train
+  corpus_revision: "b08601e04326c79dfdd32d625aee71d232d685c3"
+  # THEIR join+encode-once token stream, but each block gets a prepended BOS.
+  tokenization_protocol: duan_exact_join_encode_once_with_bos
+  tokenizer_id: google/gemma-2-2b
+  tokenizer_revision: "c5ebcd40d208330abc697524c919956e692655cf"
+  bos_policy: prepend_each_block
+  sequence_packing: duan_exact
+  sae_release: gemma-scope-2b-pt-res
+  sae_id: layer_12/width_16k/average_l0_82
+  sae_revision: "fd571b47c1c64851e9b1989792367b9babb4af63"
+
+model_config:
+  model:
+    name: google/gemma-2-2b
+    dtype: bfloat16
+    device: cuda
+    no_processing: true
+  sae:
+    release: gemma-scope-2b-pt-res
+    sae_id: layer_12/width_16k/average_l0_82
+    d_sae: 16384
+    layer: 12
+    hook: blocks.12.hook_resid_post
+    exclude_bos: true    # BOS is prepended, so drop its row from the analysis
+    encode_float32: true
+  corpus:
+    behavioral: wikitext-2-raw
+    activation: wikitext-2-raw
+  perplexity:
+    sliding_window_size: 2048
+    stride: 512
+    activation_seq_len: 256
+    seq_len: 512
+    n_tokens: 500000
+    ppl_max_tokens: 100000
+
+quant_config:
+  # Distinct results root so this run does NOT overwrite the prior reproduction
+  # outputs (default results/reproduction/) or the other runs. Artifacts land
+  # under results/isolate_tok/reproduction/sae/. results/ is gitignored.
+  results:
+    root: "results/isolate_tok"
+    sae_survival: "results/isolate_tok/reproduction/sae/survival_rates.csv"
+    sae_correlations: "results/isolate_tok/reproduction/sae/correlations_int6.npz"
+    sae_perplexity: "results/isolate_tok/reproduction/sae/perplexity.csv"
+    sae_metadata: "results/isolate_tok/reproduction/sae/metadata.json"
+    sae_gate_report: "results/isolate_tok/reproduction/sae/reproduction_gate.json"
+  gate_sae_int6:
+    bits: 6
+    survived_target: 51.30
+    degraded_target: 48.70
+    damaged_target: 0.00
+    tolerance_pp: 3.0
